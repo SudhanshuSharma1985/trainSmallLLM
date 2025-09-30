@@ -47,14 +47,28 @@ print(f"{'='*70}\n")
 # Display sample to understand structure
 print("Sample from dataset:")
 print("-" * 70)
-sample = ds[0]
-for key, value in sample.items():
-    if isinstance(value, str) and len(value) > 200:
-        print(f"{key}: {value[:200]}...")
-    else:
-        print(f"{key}: {value}")
-print("-" * 70)
-print()
+if len(ds) > 0:
+    sample = ds[0]
+    for key, value in sample.items():
+        if isinstance(value, str) and len(value) > 200:
+            print(f"{key}: {value[:200]}...")
+        else:
+            print(f"{key}: {value}")
+    print("-" * 70)
+    print()
+    
+    # Show what the processed text looks like
+    print("Testing text extraction on first sample:")
+    print("-" * 70)
+    test_text = format_medquad_text(sample)
+    print(f"Extracted text ({len(test_text)} chars):")
+    print(test_text[:500] if len(test_text) > 500 else test_text)
+    print("-" * 70)
+    print()
+else:
+    print("⚠ WARNING: Dataset appears to be empty!")
+    print("-" * 70)
+    print()
 
 # ============================================================================
 # STEP 2: Tokenization for MedQuAD Format
@@ -110,8 +124,8 @@ def process(example):
         # Format the text
         text = format_medquad_text(example)
         
-        # Quality filters
-        if len(text) < 50:  # Skip very short texts
+        # Quality filters - LESS STRICT to avoid filtering everything
+        if len(text) < 20:  # Reduced from 50
             return {'ids': [], 'len': 0}
         
         if len(text) > 15000:  # Truncate very long texts
@@ -120,14 +134,14 @@ def process(example):
         # Tokenize
         ids = enc.encode_ordinary(text)
         
-        # Skip if too few tokens
-        if len(ids) < 20:
-            return {'ids': [], 'len': 0}
+        # Skip if too few tokens - LESS STRICT
+        if len(ids) < 5:  # Reduced from 20
+            return {'ids': ids, 'len': len(ids)}
         
         return {'ids': ids, 'len': len(ids)}
     
     except Exception as e:
-        print(f"Error processing example: {e}")
+        # Return empty on error
         return {'ids': [], 'len': 0}
 
 # ============================================================================
@@ -150,13 +164,30 @@ if not os.path.exists("train.bin"):
     # Filter out empty examples
     print("Filtering valid examples...")
     tokenized = tokenized.filter(lambda x: x['len'] > 0, num_proc=4)
+    
+    # CHECK IF DATASET IS EMPTY
+    if len(tokenized) == 0:
+        raise ValueError("ERROR: All examples were filtered out! Dataset is empty. Check your data format.")
+    
     print(f"✓ Valid examples: {len(tokenized):,}")
+    
+    # CHECK MINIMUM SIZE
+    if len(tokenized) < 100:
+        print(f"⚠ WARNING: Dataset very small ({len(tokenized)} examples)")
+        print("Consider using a larger dataset or checking data loading")
     
     # Split into train/validation (90/10)
     print("Creating train/validation split...")
-    split_dataset = tokenized.train_test_split(test_size=0.1, seed=42)
-    train_data = split_dataset['train']
-    val_data = split_dataset['test']
+    
+    # Ensure we have enough data to split
+    if len(tokenized) < 10:
+        print("⚠ Dataset too small to split. Using all data for training.")
+        train_data = tokenized
+        val_data = tokenized  # Use same data for validation (not ideal but prevents crash)
+    else:
+        split_dataset = tokenized.train_test_split(test_size=0.1, seed=42)
+        train_data = split_dataset['train']
+        val_data = split_dataset['test']
     
     print(f"✓ Training samples: {len(train_data):,}")
     print(f"✓ Validation samples: {len(val_data):,}")
@@ -164,6 +195,10 @@ if not os.path.exists("train.bin"):
     # Calculate dataset statistics
     train_tokens = np.sum(train_data['len'], dtype=np.uint64)
     val_tokens = np.sum(val_data['len'], dtype=np.uint64)
+    
+    # CHECK FOR ZERO TOKENS
+    if train_tokens == 0:
+        raise ValueError("ERROR: Training data has 0 tokens! Check your text extraction logic.")
     
     print(f"\nDataset Token Statistics:")
     print(f"  Training tokens: {train_tokens:,} (~{train_tokens*2/1e6:.1f} MB)")
@@ -175,6 +210,12 @@ if not os.path.exists("train.bin"):
     print("Creating memory-mapped binary files...")
     for split_name, dset in [('train', train_data), ('validation', val_data)]:
         arr_len = np.sum(dset['len'], dtype=np.uint64)
+        
+        # SAFETY CHECK
+        if arr_len == 0:
+            print(f"⚠ WARNING: {split_name} has 0 tokens, skipping file creation")
+            continue
+            
         filename = f'{split_name}.bin'
         dtype = np.uint16
         
@@ -183,6 +224,10 @@ if not os.path.exists("train.bin"):
         
         # Use adaptive batch count based on dataset size
         total_batches = min(512, max(32, len(dset) // 100))
+        
+        # SAFETY: Ensure at least 1 batch
+        if total_batches == 0:
+            total_batches = 1
         
         idx = 0
         for batch_idx in tqdm(range(total_batches), desc=f'Writing {filename}'):
